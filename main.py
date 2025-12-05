@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Project Python - Options Analyzer with TastyTrade & Alpaca Support"""
+"""Project Python - Options Analyzer with Monte Carlo, Real Greeks, and Market Analysis"""
 
 import sys
 import json
@@ -11,7 +11,9 @@ from pathlib import Path
 from brokers.alpaca_client import AlpacaClient
 from analyzers.strategy_detector import StrategyDetector
 from analyzers.greeks_calculator import GreeksCalculator
-from analyzers.market_data import MarketDataFetcher
+from analyzers.monte_carlo import MonteCarloSimulator
+from analyzers.market_analyzer import MarketAnalyzer
+from analyzers.report_formatter import ReportFormatter
 from config import load_config
 
 
@@ -35,13 +37,12 @@ def create_tastytrade_client(config: dict, sandbox: bool = False):
     """Create TastyTrade client"""
     from brokers.tastytrade_client import TastyTradeClient
     
-    # Check for stored credentials
     username = config.get('tastytrade_username')
     password = config.get('tastytrade_password')
     
     if not username or not password:
         print("\n🔐 TastyTrade Login Required")
-        print("   (Add TASTYTRADE_USERNAME and TASTYTRADE_PASSWORD to .env to skip this)")
+        print("   (Add TASTYTRADE_USERNAME and TASTYTRADE_PASSWORD to .env to skip)")
         username = input("   Username: ").strip()
         password = getpass.getpass("   Password: ")
     
@@ -58,29 +59,37 @@ def create_tastytrade_client(config: dict, sandbox: bool = False):
 def main():
     """Main program"""
     
-    # Parse command-line arguments first
-    parser = argparse.ArgumentParser(description='Options Analyzer - TastyTrade & Alpaca')
-    parser.add_argument('--symbol', '-s', type=str, help='Symbol to analyze (e.g., SPY)')
-    parser.add_argument('--choice', '-c', type=int, help='Symbol choice number (1-based)')
-    parser.add_argument('--broker', '-b', type=str, default='alpaca', 
+    # Parse arguments
+    parser = argparse.ArgumentParser(description='Options Analyzer with Monte Carlo')
+    parser.add_argument('--symbol', '-s', type=str, help='Symbol to analyze')
+    parser.add_argument('--choice', '-c', type=int, help='Symbol choice number')
+    parser.add_argument('--broker', '-b', type=str, default='alpaca',
                         choices=['alpaca', 'tastytrade', 'tt'],
-                        help='Broker to use (default: alpaca)')
-    parser.add_argument('--live', action='store_true', help='Use live account (default: paper/sandbox)')
+                        help='Broker (default: alpaca)')
+    parser.add_argument('--live', action='store_true', help='Use live account')
+    parser.add_argument('--monte-carlo', '-mc', type=int, default=50000,
+                        help='Monte Carlo paths (default: 50000)')
+    parser.add_argument('--heston', action='store_true', 
+                        help='Use Heston model instead of GBM')
+    parser.add_argument('--no-monte-carlo', action='store_true',
+                        help='Skip Monte Carlo simulation')
+    parser.add_argument('--quiet', '-q', action='store_true',
+                        help='Minimal output')
     args = parser.parse_args()
     
-    # Normalize broker name
     broker_name = 'tastytrade' if args.broker == 'tt' else args.broker
     is_paper = not args.live
     
-    print("\n" + "="*60)
+    print("\n" + "═"*60)
     print("PROJECT PYTHON - OPTIONS ANALYZER")
-    print("="*60)
+    print("═"*60)
     print(f"Broker: {broker_name.upper()} ({'Paper' if is_paper else '🔴 LIVE'})")
+    print(f"Monte Carlo: {args.monte_carlo:,} paths {'(Heston)' if args.heston else '(GBM)'}")
     
     # Load config
     config = load_config()
     
-    # Initialize client based on broker choice
+    # Initialize broker client
     try:
         if broker_name == 'tastytrade':
             client = create_tastytrade_client(config, sandbox=is_paper)
@@ -89,31 +98,25 @@ def main():
             client = create_alpaca_client(config, paper=is_paper)
             broker_display = "Alpaca" + (" Paper" if is_paper else " Live")
     except Exception as e:
-        print(f"\n❌ Failed to connect to {broker_name}: {e}")
+        print(f"\n❌ Failed to connect: {e}")
         sys.exit(1)
     
     # Fetch account balance
-    print(f"\nFetching account balance from {broker_display}...")
+    print(f"\n[1/7] Fetching account balance...")
     try:
         balance = client.get_account_balance()
-        print(f"  💰 Equity: ${balance['equity']:,.2f}")
-        print(f"  💵 Cash: ${balance['cash']:,.2f}")
-        print(f"  📊 Portfolio Value: ${balance['portfolio_value']:,.2f}")
-        print(f"  💳 Buying Power: ${balance['buying_power']:,.2f}")
+        print(f"      💰 Equity: ${balance['equity']:,.2f}")
+        print(f"      💵 Cash: ${balance['cash']:,.2f}")
+        print(f"      💳 Buying Power: ${balance['buying_power']:,.2f}")
     except Exception as e:
-        print(f"  ⚠️  Could not fetch balance: {e}")
+        print(f"      ⚠️  Balance error: {e}")
     
     # Fetch positions
-    print(f"\nFetching positions from {broker_display}...")
-    
-    if broker_name == 'tastytrade':
-        positions = client.get_positions()
-    else:
-        positions = client.get_all_positions()
+    print(f"\n[2/7] Fetching positions...")
+    positions = client.get_positions() if broker_name == 'tastytrade' else client.get_all_positions()
     
     if not positions:
-        print(f"\n❌ No option positions found in {broker_display}")
-        print("   Open some positions first, then re-run this script")
+        print(f"\n❌ No option positions found")
         sys.exit(1)
     
     # Group by symbol
@@ -124,152 +127,123 @@ def main():
             symbols[sym] = []
         symbols[sym].append(pos)
     
-    print(f"\n✓ Found {len(positions)} legs across {len(symbols)} symbols\n")
+    print(f"      ✓ Found {len(positions)} legs across {len(symbols)} symbols")
     
-    # Display symbols
     symbol_list = list(symbols.keys())
     for i, sym in enumerate(symbol_list, 1):
-        count = len(symbols[sym])
-        print(f"  {i}. {sym} ({count} legs)")
+        print(f"        {i}. {sym} ({len(symbols[sym])} legs)")
     
-    # Select symbol - support command-line arg or interactive input
+    # Select symbol
     if args.symbol and args.choice is not None:
-        print("\n❌ Error: Cannot specify both --symbol and --choice")
-        print("   Please use only one option")
+        print("\n❌ Cannot specify both --symbol and --choice")
         sys.exit(1)
     
     if args.symbol:
-        if args.symbol.upper() not in symbol_list:
-            print(f"\n❌ Symbol '{args.symbol}' not found in positions")
-            print(f"   Available symbols: {', '.join(symbol_list)}")
-            sys.exit(1)
         symbol = args.symbol.upper()
+        if symbol not in symbol_list:
+            print(f"\n❌ Symbol '{symbol}' not found")
+            sys.exit(1)
     elif args.choice is not None:
         if args.choice < 1 or args.choice > len(symbol_list):
             print(f"\n❌ Invalid choice: {args.choice}")
-            print(f"   Please choose between 1 and {len(symbol_list)}")
             sys.exit(1)
         symbol = symbol_list[args.choice - 1]
     elif sys.stdin.isatty():
         try:
-            user_input = input("\nSelect symbol (number or name): ").strip()
-            
+            user_input = input("\n      Select (number or name): ").strip()
             if user_input.isdigit():
                 choice = int(user_input)
                 if choice < 1 or choice > len(symbol_list):
-                    print(f"\n❌ Invalid choice: {choice}")
-                    print(f"   Please choose between 1 and {len(symbol_list)}")
+                    print(f"\n❌ Invalid choice")
                     sys.exit(1)
                 symbol = symbol_list[choice - 1]
             else:
-                user_input_upper = user_input.upper()
-                if user_input_upper in symbol_list:
-                    symbol = user_input_upper
-                else:
-                    print(f"\n❌ Symbol '{user_input}' not found in positions")
-                    print(f"   Available: {', '.join(symbol_list)}")
+                symbol = user_input.upper()
+                if symbol not in symbol_list:
+                    print(f"\n❌ Symbol not found")
                     sys.exit(1)
         except (EOFError, KeyboardInterrupt):
             print("\n❌ Cancelled")
             sys.exit(1)
     else:
-        print("\n⚠️  Non-interactive terminal detected")
-        print(f"   Using first symbol: {symbol_list[0]}")
-        print(f"   (Use --symbol or --choice to specify)")
         symbol = symbol_list[0]
+        print(f"      Using: {symbol}")
     
-    print(f"\n{'='*60}")
-    print(f"ANALYZING {symbol}")
-    print(f"{'='*60}")
-    
-    # Get positions for this symbol
     symbol_positions = symbols[symbol]
     
-    print(f"\n[1/5] Position legs:")
-    for i, pos in enumerate(symbol_positions, 1):
-        print(f"      {i}. {pos['position'].upper()} {pos['qty']}x "
-              f"{pos['type'].upper()} ${pos['strike']:.0f} @ ${pos['current_premium']:.2f}")
+    print(f"\n{'═'*60}")
+    print(f"ANALYZING {symbol}")
+    print(f"{'═'*60}")
     
-    # Detect strategy
-    print("\n[2/5] Detecting strategy...")
+    # Strategy detection
+    print(f"\n[3/7] Detecting strategy...")
     detector = StrategyDetector(symbol_positions)
     strategy_info = detector.detect_strategy()
     print(f"      ✓ {strategy_info['strategy']}")
     print(f"      ✓ {strategy_info['dte']} DTE")
     print(f"      ✓ P&L: ${strategy_info['current_pnl']:.2f}")
     
-    # Get market data
-    print("\n[3/5] Fetching market data...")
+    # Market data and analysis
+    print(f"\n[4/7] Analyzing market conditions...")
+    market_analyzer = MarketAnalyzer()
+    
     try:
         current_price = client.get_current_price(symbol)
         print(f"      ✓ {symbol}: ${current_price:.2f}")
-    except Exception as e:
-        print(f"      ⚠️  Using fallback price source: {e}")
+    except Exception:
         current_price = 450.0
+        print(f"      ⚠️  Using fallback price")
     
-    # Get market metrics (IV rank, earnings, etc.)
-    market_data = {}
+    # Get VIX and term structure
+    vix_data = market_analyzer.get_vix_data()
+    term_structure = market_analyzer.analyze_term_structure(vix_data)
+    print(f"      ✓ VIX: {vix_data['vix']:.1f}")
+    print(f"      ✓ Term Structure: {term_structure['structure']}")
+    
+    # Get IV rank (from broker or calculated)
     if broker_name == 'tastytrade':
         try:
             metrics = client.get_market_metrics(symbol)
-            market_data = {
-                'current_price': current_price,
-                'iv_rank': metrics.get('iv_rank', 0),
-                'iv_percentile': metrics.get('iv_percentile', 0),
-                'iv': metrics.get('iv', 0),
-                'hv_30': metrics.get('hv_30', 0),
-                'earnings_date': metrics.get('earnings_date'),
-                'term_structure': 'normal_contango',  # TODO: Calculate from VIX term
-                'put_call_skew': 0,  # TODO: Calculate from chain
-                'vol_trend': 'stable',
-                'earnings_in_dte': bool(metrics.get('earnings_date'))
-            }
-            print(f"      ✓ IV Rank: {market_data['iv_rank']:.0f}")
-            print(f"      ✓ IV Percentile: {market_data['iv_percentile']:.0f}")
-            if market_data['earnings_date']:
-                print(f"      ✓ Earnings: {market_data['earnings_date']}")
-        except Exception as e:
-            print(f"      ⚠️  Could not fetch TastyTrade metrics: {e}")
-            market_fetcher = MarketDataFetcher()
-            market_data = market_fetcher.fetch_all(symbol)
-            market_data['current_price'] = current_price
+            iv_rank = metrics.get('iv_rank', 0)
+            iv_percentile = metrics.get('iv_percentile', 0)
+            earnings_date = metrics.get('earnings_date')
+            print(f"      ✓ IV Rank: {iv_rank:.0f} (from TastyTrade)")
+        except Exception:
+            iv_analysis = market_analyzer.calculate_iv_rank(symbol)
+            iv_rank = iv_analysis['iv_rank']
+            iv_percentile = iv_analysis['iv_percentile']
+            earnings_date = None
     else:
-        market_fetcher = MarketDataFetcher()
-        market_data = market_fetcher.fetch_all(symbol)
-        market_data['current_price'] = current_price
+        iv_analysis = market_analyzer.calculate_iv_rank(symbol)
+        iv_rank = iv_analysis['iv_rank']
+        iv_percentile = iv_analysis['iv_percentile']
+        earnings_info = market_analyzer.get_earnings_info(symbol)
+        earnings_date = earnings_info.get('earnings_date')
+        print(f"      ✓ IV Rank: {iv_rank:.0f} (calculated)")
     
-    # Calculate/Fetch Greeks
-    print("\n[4/5] Fetching Greeks...")
+    if earnings_date:
+        print(f"      ⚠️  Earnings: {earnings_date}")
     
+    # Greeks
+    print(f"\n[5/7] Fetching Greeks...")
     if broker_name == 'tastytrade':
-        # Get REAL Greeks from TastyTrade
         try:
             enriched = client.enrich_positions_with_greeks(symbol_positions)
-            print("      ✓ Real Greeks from TastyTrade exchange")
-        except Exception as e:
-            print(f"      ⚠️  Falling back to calculated Greeks: {e}")
+            print("      ✓ Real Greeks from exchange")
+        except Exception:
             greeks_calc = GreeksCalculator(client)
-            enriched = greeks_calc.enrich_positions(symbol_positions, market_data)
+            enriched = greeks_calc.enrich_positions(symbol_positions, {'current_price': current_price})
+            print("      ✓ Calculated Greeks (B-S)")
     else:
-        # Calculate Greeks with Black-Scholes
         greeks_calc = GreeksCalculator(client)
-        enriched = greeks_calc.enrich_positions(symbol_positions, market_data)
-        print("      ✓ Greeks calculated (Black-Scholes)")
+        enriched = greeks_calc.enrich_positions(symbol_positions, {'current_price': current_price})
+        print("      ✓ Calculated Greeks (B-S)")
     
-    # Aggregate position Greeks
-    position_delta = 0
-    position_gamma = 0
-    position_theta = 0
-    position_vega = 0
-    
-    for pos in enriched:
-        mult = 1 if pos['position'] == 'long' else -1
-        qty = pos['qty']
-        
-        if pos.get('delta'): position_delta += pos['delta'] * qty * mult
-        if pos.get('gamma'): position_gamma += pos['gamma'] * qty * mult
-        if pos.get('theta'): position_theta += pos['theta'] * qty * mult
-        if pos.get('vega'): position_vega += pos['vega'] * qty * mult
+    # Aggregate Greeks
+    position_delta = sum((p.get('delta', 0) or 0) * p['qty'] * (1 if p['position'] == 'long' else -1) for p in enriched)
+    position_gamma = sum((p.get('gamma', 0) or 0) * p['qty'] * (1 if p['position'] == 'long' else -1) for p in enriched)
+    position_theta = sum((p.get('theta', 0) or 0) * p['qty'] * (1 if p['position'] == 'long' else -1) for p in enriched)
+    position_vega = sum((p.get('vega', 0) or 0) * p['qty'] * (1 if p['position'] == 'long' else -1) for p in enriched)
     
     greeks = {
         'position_delta': round(position_delta, 3),
@@ -278,23 +252,59 @@ def main():
         'position_vega': round(position_vega, 3)
     }
     
-    print(f"      ✓ Delta: {greeks['position_delta']:+.3f}")
-    print(f"      ✓ Theta: ${greeks['position_theta']*100:+.2f}/day")
-    if any(pos.get('iv') for pos in enriched):
-        avg_iv = sum(pos.get('iv', 0) for pos in enriched if pos.get('iv')) / len(enriched)
-        print(f"      ✓ Avg IV: {avg_iv*100:.1f}%")
+    print(f"      Δ Delta: {greeks['position_delta']:+.3f}")
+    print(f"      Θ Theta: ${greeks['position_theta']*100:+.2f}/day")
+    
+    # Put/Call Skew
+    skew = market_analyzer.calculate_put_call_skew(positions=enriched)
+    print(f"      ✓ Put/Call Skew: {skew['skew']:+.1f}")
+    
+    # Monte Carlo
+    monte_carlo_result = None
+    if not args.no_monte_carlo:
+        print(f"\n[6/7] Running Monte Carlo ({args.monte_carlo:,} paths)...")
+        
+        # Get average IV from positions
+        ivs = [p.get('iv', 0) for p in enriched if p.get('iv')]
+        avg_iv = sum(ivs) / len(ivs) if ivs else 0.25
+        
+        simulator = MonteCarloSimulator(n_paths=args.monte_carlo)
+        
+        try:
+            mc_result = simulator.run_simulation(
+                current_price=current_price,
+                positions=enriched,
+                dte=strategy_info['dte'],
+                volatility=avg_iv,
+                entry_credit=strategy_info['net_credit'],
+                breakeven_lower=strategy_info.get('breakeven_lower'),
+                breakeven_upper=strategy_info.get('breakeven_upper'),
+                use_heston=args.heston
+            )
+            
+            monte_carlo_result = mc_result.to_dict()
+            
+            print(f"      ✓ Probability of Profit: {mc_result.pop:.1f}%")
+            print(f"      ✓ Expected P&L: ${mc_result.expected_pl:+.2f}")
+            print(f"      ✓ 95% VaR: ${mc_result.var_95:.2f}")
+            print(f"      ✓ Optimal Exit: {mc_result.optimal_exit_dte} DTE")
+            
+        except Exception as e:
+            print(f"      ⚠️  Monte Carlo error: {e}")
+    else:
+        print(f"\n[6/7] Monte Carlo skipped")
     
     # Compile analysis
-    print("\n[5/5] Compiling analysis...")
+    print(f"\n[7/7] Compiling analysis...")
     
     analysis_data = {
         'timestamp': datetime.now().isoformat(),
         'account_type': broker_display,
         'underlying': symbol,
         'current_price': current_price,
-        'vix': market_data.get('vix', 0),
-        'iv_rank': market_data.get('iv_rank', 0),
-        'iv_percentile': market_data.get('iv_percentile', 0),
+        'vix': vix_data['vix'],
+        'iv_rank': iv_rank,
+        'iv_percentile': iv_percentile,
         
         'position': {
             'position_id': f"{strategy_info['strategy']}_{symbol}_{datetime.now().strftime('%Y%m%d')}",
@@ -315,34 +325,39 @@ def main():
         'greeks': greeks,
         
         'market_regime': {
-            'term_structure': market_data.get('term_structure', 'unknown'),
-            'put_call_skew': market_data.get('put_call_skew', 0),
-            'recent_volatility_trend': market_data.get('vol_trend', 'unknown'),
-            'earnings_date': market_data.get('earnings_date'),
-            'earnings_in_dte': market_data.get('earnings_in_dte', False)
+            'term_structure': term_structure['structure'],
+            'term_structure_description': term_structure['description'],
+            'put_call_skew': skew['skew'],
+            'recent_volatility_trend': market_analyzer._determine_vol_trend(vix_data),
+            'earnings_date': earnings_date,
+            'earnings_in_dte': bool(earnings_date)
         }
     }
     
-    # Save to file
+    if monte_carlo_result:
+        analysis_data['monte_carlo'] = monte_carlo_result
+    
+    # Save JSON
     output_dir = Path(__file__).parent / 'output'
     output_dir.mkdir(exist_ok=True)
     
     filename = f"analysis_{symbol}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
     filepath = output_dir / filename
     
-    with open(filepath, 'w') as f:
-        json.dump(analysis_data, f, indent=2)
+    # Use formatter for clean JSON
+    clean_json = ReportFormatter.format_json_for_claude(analysis_data)
     
-    print(f"\n{'='*60}")
-    print("✓ ANALYSIS COMPLETE")
-    print(f"{'='*60}")
-    print(f"Broker: {broker_display}")
-    print(f"Strategy: {strategy_info['strategy']}")
-    print(f"P&L: ${strategy_info['current_pnl']:.2f}")
-    print(f"Greeks Source: {'Exchange (Real)' if broker_name == 'tastytrade' else 'Calculated (B-S)'}")
-    print(f"\nSaved to: {filepath}")
+    with open(filepath, 'w') as f:
+        json.dump(clean_json, f, indent=2)
+    
+    # Print formatted report
+    if not args.quiet:
+        report = ReportFormatter.format_console_report(analysis_data)
+        print(report)
+    
+    print(f"\n✓ Saved to: {filepath}")
     print(f"\n📊 Send this JSON to Claude for recommendation!")
-    print(f"{'='*60}\n")
+    print("═"*60 + "\n")
     
     # Cleanup
     if broker_name == 'tastytrade' and hasattr(client, 'close'):
