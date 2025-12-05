@@ -9,6 +9,7 @@ Project Python - Options Analyzer
 import sys
 import json
 import argparse
+import requests
 from datetime import datetime
 from pathlib import Path
 
@@ -91,53 +92,162 @@ def main():
         print(f"\n❌ Alpaca connection failed: {e}")
         sys.exit(1)
 
-    # Show TastyTrade account balances (read-only)
-    tt_balances = []
+    # ═══════════════════════════════════════════════════════════
+    # BROKER DASHBOARD
+    # ═══════════════════════════════════════════════════════════
+    print("\n" + "─"*60)
+    print("📊 BROKER DASHBOARD")
+    print("─"*60)
+    
+    # ─── ALPACA ───
+    print("\n🦙 ALPACA " + ("(Paper)" if args.live is False else "(Live)"))
+    try:
+        alpaca_bal = alpaca.get_account_balance()
+        print(f"   💰 Equity: ${alpaca_bal['equity']:,.2f}")
+        print(f"   💵 Cash: ${alpaca_bal['cash']:,.2f}")
+        print(f"   💳 Buying Power: ${alpaca_bal['buying_power']:,.2f}")
+        
+        # Alpaca open orders
+        try:
+            orders_url = f"{alpaca.base_url}/v2/orders?status=open"
+            orders_resp = requests.get(orders_url, headers=alpaca.headers, timeout=10)
+            open_orders = orders_resp.json() if orders_resp.status_code == 200 else []
+            if open_orders:
+                print(f"\n   📋 Open Orders: {len(open_orders)}")
+                for order in open_orders[:5]:
+                    side = order.get('side', '').upper()
+                    qty = order.get('qty', '')
+                    symbol = order.get('symbol', '')
+                    order_type = order.get('type', '')
+                    print(f"      • {side} {qty}x {symbol} ({order_type})")
+            else:
+                print(f"   📋 Open Orders: None")
+        except Exception:
+            pass
+        
+        # Alpaca recent activity
+        try:
+            activities_url = f"{alpaca.base_url}/v2/account/activities/FILL?direction=desc&page_size=5"
+            act_resp = requests.get(activities_url, headers=alpaca.headers, timeout=10)
+            activities = act_resp.json() if act_resp.status_code == 200 else []
+            if activities:
+                print(f"\n   📜 Recent Fills:")
+                for act in activities[:3]:
+                    side = act.get('side', '').upper()
+                    qty = act.get('qty', '')
+                    symbol = act.get('symbol', '')
+                    price = act.get('price', '')
+                    date = act.get('transaction_time', '')[:10]
+                    print(f"      • {date}: {side} {qty}x {symbol} @ ${price}")
+        except Exception:
+            pass
+            
+    except Exception as e:
+        print(f"   ⚠️  Error: {e}")
+    
+    # ─── TASTYTRADE ───
+    tt_trader = None
     if config.get('tastytrade_username') and config.get('tastytrade_password'):
-        print("\n[0/7] Fetching TastyTrade account balances (read-only)...")
+        print("\n🍒 TASTYTRADE (Live)")
         try:
             tt_trader = TastyTradeTrader(
                 username=config['tastytrade_username'],
                 password=config['tastytrade_password'],
-                sandbox=False  # live endpoints, read-only balance
+                sandbox=False
             )
             if tt_trader._authenticated:
                 # Get all accounts
-                import requests
                 url = f"{tt_trader.base_url}/customers/me/accounts"
                 resp = requests.get(url, headers=tt_trader.headers, timeout=10)
-                resp.raise_for_status()
                 accounts = resp.json().get('data', {}).get('items', [])
+                
                 for acct in accounts:
                     acc_num = acct.get('account', {}).get('account-number')
                     nickname = acct.get('account', {}).get('nickname') or acct.get('account', {}).get('account-type-name')
-                    # fetch balance per account
-                    bal = {}
-                    try:
-                        bal = requests.get(
-                            f"{tt_trader.base_url}/accounts/{acc_num}/balances",
-                            headers=tt_trader.headers,
-                            timeout=10
-                        ).json().get('data', {})
-                    except Exception:
-                        bal = {}
-                    tt_balances.append({
-                        'account': acc_num,
-                        'nickname': nickname,
-                        'equity': safe_float(bal.get('net-liquidating-value', 0)),
-                        'cash': safe_float(bal.get('cash-balance', 0)),
-                        'buying_power': safe_float(bal.get('derivative-buying-power', 0))
-                    })
-                # print balances
-                for b in tt_balances:
-                    print(f"      🧾 TT {b['account']} ({b['nickname']}): Equity ${b['equity']:,.2f} | Cash ${b['cash']:,.2f} | BP ${b['buying_power']:,.2f}")
+                    
+                    # Balance
+                    bal = requests.get(
+                        f"{tt_trader.base_url}/accounts/{acc_num}/balances",
+                        headers=tt_trader.headers, timeout=10
+                    ).json().get('data', {})
+                    
+                    equity = safe_float(bal.get('net-liquidating-value', 0))
+                    cash = safe_float(bal.get('cash-balance', 0))
+                    bp = safe_float(bal.get('derivative-buying-power', 0))
+                    
+                    print(f"   📁 {acc_num} ({nickname})")
+                    print(f"      💰 Equity: ${equity:,.2f} | Cash: ${cash:,.2f} | BP: ${bp:,.2f}")
+                    
+                    # Positions
+                    pos_resp = requests.get(
+                        f"{tt_trader.base_url}/accounts/{acc_num}/positions",
+                        headers=tt_trader.headers, timeout=10
+                    )
+                    positions = pos_resp.json().get('data', {}).get('items', [])
+                    if positions:
+                        print(f"      📊 Positions: {len(positions)}")
+                        for pos in positions[:3]:
+                            symbol = pos.get('symbol', '').strip()
+                            qty = pos.get('quantity', 0)
+                            direction = 'Long' if qty > 0 else 'Short'
+                            pnl = safe_float(pos.get('unrealized-day-gain', 0))
+                            print(f"         • {direction} {abs(qty)}x {symbol[:20]} P&L: ${pnl:+,.2f}")
+                    
+                    # Open orders
+                    orders_resp = requests.get(
+                        f"{tt_trader.base_url}/accounts/{acc_num}/orders/live",
+                        headers=tt_trader.headers, timeout=10
+                    )
+                    orders = orders_resp.json().get('data', {}).get('items', [])
+                    if orders:
+                        print(f"      📋 Open Orders: {len(orders)}")
+                        for order in orders[:3]:
+                            status = order.get('status', '')
+                            legs = order.get('legs', [])
+                            if legs:
+                                leg = legs[0]
+                                action = leg.get('action', '')
+                                qty = leg.get('quantity', '')
+                                symbol = leg.get('symbol', '').strip()[:15]
+                                print(f"         • {status}: {action} {qty}x {symbol}")
             else:
-                print("      ⚠️  TastyTrade auth failed (balances skipped)")
+                print("   ⚠️  Auth failed")
         except Exception as e:
-            print(f"      ⚠️  TastyTrade balance fetch error: {e}")
+            print(f"   ⚠️  Error: {e}")
     
-    # Fetch Schwab balances (read-only)
+    # ─── TASTYTRADE SANDBOX ───
+    if config.get('tastytrade_sandbox_username') and config.get('tastytrade_sandbox_password'):
+        print("\n🧪 TASTYTRADE SANDBOX")
+        try:
+            tt_sandbox = TastyTradeTrader(
+                username=config['tastytrade_sandbox_username'],
+                password=config['tastytrade_sandbox_password'],
+                sandbox=True
+            )
+            if tt_sandbox._authenticated:
+                bal = tt_sandbox.get_account_balance()
+                print(f"   📁 {tt_sandbox.account_number}")
+                print(f"      💰 Equity: ${bal.get('equity', 0):,.2f} | Cash: ${bal.get('cash', 0):,.2f}")
+                
+                positions = tt_sandbox.get_positions()
+                if positions:
+                    print(f"      📊 Positions: {len(positions)}")
+                    for pos in positions[:3]:
+                        direction = pos.get('position', '').upper()
+                        qty = pos.get('qty', 0)
+                        symbol = pos.get('symbol', '')[:20]
+                        print(f"         • {direction} {qty}x {symbol}")
+                
+                orders = tt_sandbox.get_orders('Live')
+                if orders:
+                    print(f"      📋 Pending Orders: {len(orders)}")
+        except Exception as e:
+            print(f"   ⚠️  Error: {e}")
+    
+    # ─── SCHWAB ───
+    schwab_token = None
     if config.get('schwab_refresh_token'):
+        print("\n🏦 SCHWAB (Live)")
         try:
             import base64
             client_id = config['schwab_app_key']
@@ -152,8 +262,13 @@ def main():
             
             if token_resp.status_code == 200:
                 schwab_token = token_resp.json()['access_token']
-                schwab_resp = requests.get('https://api.schwabapi.com/trader/v1/accounts',
-                    headers={'Authorization': f'Bearer {schwab_token}', 'Accept': 'application/json'}, timeout=20)
+                schwab_headers = {'Authorization': f'Bearer {schwab_token}', 'Accept': 'application/json'}
+                
+                # Accounts with positions
+                schwab_resp = requests.get(
+                    'https://api.schwabapi.com/trader/v1/accounts?fields=positions',
+                    headers=schwab_headers, timeout=20
+                )
                 
                 if schwab_resp.status_code == 200:
                     for acct in schwab_resp.json():
@@ -161,14 +276,42 @@ def main():
                         num = sec.get('accountNumber', '?')
                         typ = sec.get('type', 'Unknown')
                         bal = sec.get('currentBalances', {})
+                        
                         equity = bal.get('liquidationValue', 0)
                         cash = bal.get('cashBalance', bal.get('availableFunds', 0))
                         bp = bal.get('buyingPower', 0)
-                        print(f"      💵 Schwab {num} ({typ}): Equity ${equity:,.2f} | Cash ${cash:,.2f} | BP ${bp:,.2f}")
+                        
+                        print(f"   📁 {num} ({typ})")
+                        print(f"      💰 Equity: ${equity:,.2f} | Cash: ${cash:,.2f} | BP: ${bp:,.2f}")
+                        
+                        # Positions
+                        positions = sec.get('positions', [])
+                        if positions:
+                            print(f"      📊 Positions: {len(positions)}")
+                            for pos in positions[:3]:
+                                symbol = pos.get('instrument', {}).get('symbol', '')
+                                qty = pos.get('longQuantity', 0) or pos.get('shortQuantity', 0)
+                                mkt_val = pos.get('marketValue', 0)
+                                print(f"         • {qty}x {symbol} (${mkt_val:,.2f})")
+                
+                # Orders
+                try:
+                    orders_resp = requests.get(
+                        'https://api.schwabapi.com/trader/v1/orders',
+                        headers=schwab_headers, timeout=20
+                    )
+                    if orders_resp.status_code == 200:
+                        orders = orders_resp.json()
+                        if orders:
+                            print(f"   📋 Recent Orders: {len(orders)}")
+                except Exception:
+                    pass
             else:
-                print(f"      ⚠️  Schwab token refresh failed (may need re-auth)")
+                print("   ⚠️  Token refresh failed (run: python schwab_auth.py)")
         except Exception as e:
-            print(f"      ⚠️  Schwab balance error: {e}")
+            print(f"   ⚠️  Error: {e}")
+    
+    print("\n" + "─"*60)
     
     # Initialize TastyTrade for market data (real Greeks/IV)
     tastytrade = None
