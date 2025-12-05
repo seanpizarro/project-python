@@ -34,6 +34,10 @@ def load_config() -> Dict[str, str]:
         'tastytrade_username': os.getenv('TASTYTRADE_USERNAME', ''),
         'tastytrade_password': os.getenv('TASTYTRADE_PASSWORD', ''),
         
+        # TastyTrade Sandbox (cert environment)
+        'tastytrade_sandbox_username': os.getenv('TASTYTRADE_SANDBOX_USERNAME', ''),
+        'tastytrade_sandbox_password': os.getenv('TASTYTRADE_SANDBOX_PASSWORD', ''),
+        
         # API keys for market data
         'polygon_api_key': os.getenv('POLYGON_API_KEY', ''),
         'finnhub_api_key': os.getenv('FINNHUB_API_KEY', ''),
