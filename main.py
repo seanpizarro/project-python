@@ -4,24 +4,39 @@ Project Python - Options Analyzer
 - Positions from: Alpaca
 - Real Greeks/IV from: TastyTrade (when available)
 - Trading: Alpaca
+
+Performance Features:
+- Parallel API fetching (ThreadPoolExecutor)
+- Caching for market data (60s TTL)
+- JAX-accelerated Monte Carlo (GPU when available)
 """
 
 import sys
 import json
 import argparse
 import requests
+import time
 from datetime import datetime
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from brokers.alpaca_client import AlpacaClient
 from brokers.tastytrade_trader import TastyTradeTrader
 from utils.helpers import safe_float
+from utils.cache import cached, get_cache, clear_cache
 from analyzers.strategy_detector import StrategyDetector
 from analyzers.greeks_calculator import GreeksCalculator
-from analyzers.monte_carlo import MonteCarloSimulator
 from analyzers.market_analyzer import MarketAnalyzer
 from analyzers.report_formatter import ReportFormatter
 from config import load_config
+
+# Try to use JAX-accelerated Monte Carlo
+try:
+    from analyzers.monte_carlo_jax import MonteCarloJAX as MonteCarloSimulator
+    MC_BACKEND = "JAX"
+except ImportError:
+    from analyzers.monte_carlo import MonteCarloSimulator
+    MC_BACKEND = "NumPy"
 
 
 def create_tastytrade_data_client(config: dict):
@@ -93,197 +108,104 @@ def main():
         sys.exit(1)
 
     # ═══════════════════════════════════════════════════════════
-    # BROKER DASHBOARD
+    # BROKER DASHBOARD (Parallel Fetching)
     # ═══════════════════════════════════════════════════════════
+    dashboard_start = time.time()
     print("\n" + "─"*60)
-    print("📊 BROKER DASHBOARD")
+    print("📊 BROKER DASHBOARD (parallel fetch)")
     print("─"*60)
     
-    # ─── ALPACA (Both Paper & Live) ───
-    def show_alpaca_account(client, label):
-        """Display Alpaca account info"""
+    # ─── Helper functions for parallel fetching ───
+    def fetch_alpaca_info(api_key, secret_key, paper, label):
+        """Fetch Alpaca account info (runs in thread)"""
         try:
+            client = AlpacaClient(api_key=api_key, secret_key=secret_key, paper=paper)
             bal = client.get_account_balance()
-            print(f"   📁 {label}")
-            print(f"      💰 Equity: ${bal['equity']:,.2f} | Cash: ${bal['cash']:,.2f} | BP: ${bal['buying_power']:,.2f}")
-            
-            # Positions
             positions = client.get_all_positions()
-            if positions:
-                # Group by underlying
-                symbols = {}
-                for pos in positions:
-                    sym = pos.get('underlying_symbol', pos.get('symbol', ''))
-                    if sym not in symbols:
-                        symbols[sym] = 0
-                    symbols[sym] += 1
-                print(f"      📊 Positions: {len(positions)} legs across {len(symbols)} symbols")
-                for sym, count in list(symbols.items())[:3]:
-                    print(f"         • {sym} ({count} legs)")
+            
+            # Group positions by underlying
+            symbols = {}
+            for pos in positions:
+                sym = pos.get('underlying_symbol', pos.get('symbol', ''))
+                if sym not in symbols:
+                    symbols[sym] = 0
+                symbols[sym] += 1
             
             # Open orders
+            open_orders = []
             try:
-                orders_url = f"{client.base_url}/v2/orders?status=open"
-                orders_resp = requests.get(orders_url, headers=client.headers, timeout=10)
-                open_orders = orders_resp.json() if orders_resp.status_code == 200 else []
-                if open_orders:
-                    print(f"      📋 Open Orders: {len(open_orders)}")
-                    for order in open_orders[:3]:
-                        side = order.get('side', '').upper()
-                        qty = order.get('qty', '')
-                        symbol = order.get('symbol', '')
-                        print(f"         • {side} {qty}x {symbol}")
-            except Exception:
+                orders_resp = requests.get(f"{client.base_url}/v2/orders?status=open", 
+                                          headers=client.headers, timeout=5)
+                if orders_resp.status_code == 200:
+                    open_orders = orders_resp.json()
+            except:
                 pass
             
             # Recent fills
+            fills = []
             try:
-                activities_url = f"{client.base_url}/v2/account/activities/FILL?direction=desc&page_size=3"
-                act_resp = requests.get(activities_url, headers=client.headers, timeout=10)
-                activities = act_resp.json() if act_resp.status_code == 200 else []
-                if activities:
-                    print(f"      📜 Recent Fills:")
-                    for act in activities[:2]:
-                        side = act.get('side', '').upper()
-                        qty = act.get('qty', '')
-                        symbol = act.get('symbol', '')[:15]
-                        price = act.get('price', '')
-                        print(f"         • {side} {qty}x {symbol} @ ${price}")
-            except Exception:
+                act_resp = requests.get(f"{client.base_url}/v2/account/activities/FILL?direction=desc&page_size=3",
+                                       headers=client.headers, timeout=5)
+                if act_resp.status_code == 200:
+                    fills = act_resp.json()[:2]
+            except:
                 pass
-                
+            
+            return {
+                'success': True, 'label': label, 'balance': bal,
+                'positions': positions, 'symbols': symbols,
+                'open_orders': open_orders, 'fills': fills
+            }
         except Exception as e:
-            print(f"   📁 {label}: ⚠️ {e}")
+            return {'success': False, 'label': label, 'error': str(e)}
     
-    print("\n🦙 ALPACA")
-    
-    # Paper account (always show)
-    if config.get('alpaca_paper_key') and config.get('alpaca_paper_secret'):
+    def fetch_tastytrade_info(username, password, sandbox, label):
+        """Fetch TastyTrade account info (runs in thread)"""
         try:
-            alpaca_paper = AlpacaClient(
-                api_key=config['alpaca_paper_key'],
-                secret_key=config['alpaca_paper_secret'],
-                paper=True
-            )
-            show_alpaca_account(alpaca_paper, "Paper Trading")
-        except Exception as e:
-            print(f"   📁 Paper Trading: ⚠️ Connection failed")
-    
-    # Live account
-    if config.get('alpaca_live_key') and config.get('alpaca_live_secret'):
-        try:
-            alpaca_live = AlpacaClient(
-                api_key=config['alpaca_live_key'],
-                secret_key=config['alpaca_live_secret'],
-                paper=False
-            )
-            show_alpaca_account(alpaca_live, "Live Trading 🔴")
-        except Exception as e:
-            print(f"   📁 Live Trading: ⚠️ Connection failed")
-    
-    # ─── TASTYTRADE ───
-    tt_trader = None
-    if config.get('tastytrade_username') and config.get('tastytrade_password'):
-        print("\n🍒 TASTYTRADE (Live)")
-        try:
-            tt_trader = TastyTradeTrader(
-                username=config['tastytrade_username'],
-                password=config['tastytrade_password'],
-                sandbox=False
-            )
-            if tt_trader._authenticated:
-                # Get all accounts
-                url = f"{tt_trader.base_url}/customers/me/accounts"
-                resp = requests.get(url, headers=tt_trader.headers, timeout=10)
-                accounts = resp.json().get('data', {}).get('items', [])
-                
-                for acct in accounts:
+            trader = TastyTradeTrader(username=username, password=password, sandbox=sandbox)
+            if not trader._authenticated:
+                return {'success': False, 'label': label, 'error': 'Auth failed'}
+            
+            accounts = []
+            url = f"{trader.base_url}/customers/me/accounts"
+            resp = requests.get(url, headers=trader.headers, timeout=8)
+            if resp.status_code == 200:
+                for acct in resp.json().get('data', {}).get('items', []):
                     acc_num = acct.get('account', {}).get('account-number')
                     nickname = acct.get('account', {}).get('nickname') or acct.get('account', {}).get('account-type-name')
                     
-                    # Balance
-                    bal = requests.get(
-                        f"{tt_trader.base_url}/accounts/{acc_num}/balances",
-                        headers=tt_trader.headers, timeout=10
-                    ).json().get('data', {})
+                    bal = {}
+                    try:
+                        bal_resp = requests.get(f"{trader.base_url}/accounts/{acc_num}/balances",
+                                               headers=trader.headers, timeout=5)
+                        if bal_resp.status_code == 200:
+                            bal = bal_resp.json().get('data', {})
+                    except:
+                        pass
                     
-                    equity = safe_float(bal.get('net-liquidating-value', 0))
-                    cash = safe_float(bal.get('cash-balance', 0))
-                    bp = safe_float(bal.get('derivative-buying-power', 0))
+                    positions = []
+                    try:
+                        pos_resp = requests.get(f"{trader.base_url}/accounts/{acc_num}/positions",
+                                               headers=trader.headers, timeout=5)
+                        if pos_resp.status_code == 200:
+                            positions = pos_resp.json().get('data', {}).get('items', [])
+                    except:
+                        pass
                     
-                    print(f"   📁 {acc_num} ({nickname})")
-                    print(f"      💰 Equity: ${equity:,.2f} | Cash: ${cash:,.2f} | BP: ${bp:,.2f}")
-                    
-                    # Positions
-                    pos_resp = requests.get(
-                        f"{tt_trader.base_url}/accounts/{acc_num}/positions",
-                        headers=tt_trader.headers, timeout=10
-                    )
-                    positions = pos_resp.json().get('data', {}).get('items', [])
-                    if positions:
-                        print(f"      📊 Positions: {len(positions)}")
-                        for pos in positions[:3]:
-                            symbol = pos.get('symbol', '').strip()
-                            qty = pos.get('quantity', 0)
-                            direction = 'Long' if qty > 0 else 'Short'
-                            pnl = safe_float(pos.get('unrealized-day-gain', 0))
-                            print(f"         • {direction} {abs(qty)}x {symbol[:20]} P&L: ${pnl:+,.2f}")
-                    
-                    # Open orders
-                    orders_resp = requests.get(
-                        f"{tt_trader.base_url}/accounts/{acc_num}/orders/live",
-                        headers=tt_trader.headers, timeout=10
-                    )
-                    orders = orders_resp.json().get('data', {}).get('items', [])
-                    if orders:
-                        print(f"      📋 Open Orders: {len(orders)}")
-                        for order in orders[:3]:
-                            status = order.get('status', '')
-                            legs = order.get('legs', [])
-                            if legs:
-                                leg = legs[0]
-                                action = leg.get('action', '')
-                                qty = leg.get('quantity', '')
-                                symbol = leg.get('symbol', '').strip()[:15]
-                                print(f"         • {status}: {action} {qty}x {symbol}")
-            else:
-                print("   ⚠️  Auth failed")
+                    accounts.append({
+                        'account': acc_num, 'nickname': nickname,
+                        'equity': safe_float(bal.get('net-liquidating-value', 0)),
+                        'cash': safe_float(bal.get('cash-balance', 0)),
+                        'bp': safe_float(bal.get('derivative-buying-power', 0)),
+                        'positions': positions
+                    })
+            
+            return {'success': True, 'label': label, 'accounts': accounts}
         except Exception as e:
-            print(f"   ⚠️  Error: {e}")
+            return {'success': False, 'label': label, 'error': str(e)}
     
-    # ─── TASTYTRADE SANDBOX ───
-    if config.get('tastytrade_sandbox_username') and config.get('tastytrade_sandbox_password'):
-        print("\n🧪 TASTYTRADE SANDBOX")
-        try:
-            tt_sandbox = TastyTradeTrader(
-                username=config['tastytrade_sandbox_username'],
-                password=config['tastytrade_sandbox_password'],
-                sandbox=True
-            )
-            if tt_sandbox._authenticated:
-                bal = tt_sandbox.get_account_balance()
-                print(f"   📁 {tt_sandbox.account_number}")
-                print(f"      💰 Equity: ${bal.get('equity', 0):,.2f} | Cash: ${bal.get('cash', 0):,.2f}")
-                
-                positions = tt_sandbox.get_positions()
-                if positions:
-                    print(f"      📊 Positions: {len(positions)}")
-                    for pos in positions[:3]:
-                        direction = pos.get('position', '').upper()
-                        qty = pos.get('qty', 0)
-                        symbol = pos.get('symbol', '')[:20]
-                        print(f"         • {direction} {qty}x {symbol}")
-                
-                orders = tt_sandbox.get_orders('Live')
-                if orders:
-                    print(f"      📋 Pending Orders: {len(orders)}")
-        except Exception as e:
-            print(f"   ⚠️  Error: {e}")
-    
-    # ─── SCHWAB ───
-    schwab_token = None
-    if config.get('schwab_refresh_token'):
-        print("\n🏦 SCHWAB (Live)")
+    def fetch_schwab_info(config):
+        """Fetch Schwab account info (runs in thread)"""
         try:
             import base64
             client_id = config['schwab_app_key']
@@ -294,60 +216,137 @@ def main():
             token_resp = requests.post('https://api.schwabapi.com/v1/oauth/token', headers={
                 'Authorization': f'Basic {basic}',
                 'Content-Type': 'application/x-www-form-urlencoded'
-            }, data={'grant_type': 'refresh_token', 'refresh_token': refresh_token}, timeout=30)
+            }, data={'grant_type': 'refresh_token', 'refresh_token': refresh_token}, timeout=10)
             
-            if token_resp.status_code == 200:
-                schwab_token = token_resp.json()['access_token']
-                schwab_headers = {'Authorization': f'Bearer {schwab_token}', 'Accept': 'application/json'}
-                
-                # Accounts with positions
-                schwab_resp = requests.get(
-                    'https://api.schwabapi.com/trader/v1/accounts?fields=positions',
-                    headers=schwab_headers, timeout=20
-                )
-                
-                if schwab_resp.status_code == 200:
-                    for acct in schwab_resp.json():
-                        sec = acct.get('securitiesAccount', {})
-                        num = sec.get('accountNumber', '?')
-                        typ = sec.get('type', 'Unknown')
-                        bal = sec.get('currentBalances', {})
-                        
-                        equity = bal.get('liquidationValue', 0)
-                        cash = bal.get('cashBalance', bal.get('availableFunds', 0))
-                        bp = bal.get('buyingPower', 0)
-                        
-                        print(f"   📁 {num} ({typ})")
-                        print(f"      💰 Equity: ${equity:,.2f} | Cash: ${cash:,.2f} | BP: ${bp:,.2f}")
-                        
-                        # Positions
-                        positions = sec.get('positions', [])
-                        if positions:
-                            print(f"      📊 Positions: {len(positions)}")
-                            for pos in positions[:3]:
-                                symbol = pos.get('instrument', {}).get('symbol', '')
-                                qty = pos.get('longQuantity', 0) or pos.get('shortQuantity', 0)
-                                mkt_val = pos.get('marketValue', 0)
-                                print(f"         • {qty}x {symbol} (${mkt_val:,.2f})")
-                
-                # Orders
-                try:
-                    orders_resp = requests.get(
-                        'https://api.schwabapi.com/trader/v1/orders',
-                        headers=schwab_headers, timeout=20
-                    )
-                    if orders_resp.status_code == 200:
-                        orders = orders_resp.json()
-                        if orders:
-                            print(f"   📋 Recent Orders: {len(orders)}")
-                except Exception:
-                    pass
-            else:
-                print("   ⚠️  Token refresh failed (run: python schwab_auth.py)")
+            if token_resp.status_code != 200:
+                return {'success': False, 'error': 'Token refresh failed'}
+            
+            schwab_token = token_resp.json()['access_token']
+            schwab_resp = requests.get('https://api.schwabapi.com/trader/v1/accounts?fields=positions',
+                headers={'Authorization': f'Bearer {schwab_token}', 'Accept': 'application/json'}, timeout=10)
+            
+            if schwab_resp.status_code != 200:
+                return {'success': False, 'error': f'API error {schwab_resp.status_code}'}
+            
+            accounts = []
+            for acct in schwab_resp.json():
+                sec = acct.get('securitiesAccount', {})
+                bal = sec.get('currentBalances', {})
+                accounts.append({
+                    'account': sec.get('accountNumber', '?'),
+                    'type': sec.get('type', 'Unknown'),
+                    'equity': bal.get('liquidationValue', 0),
+                    'cash': bal.get('cashBalance', bal.get('availableFunds', 0)),
+                    'bp': bal.get('buyingPower', 0),
+                    'positions': sec.get('positions', [])
+                })
+            
+            return {'success': True, 'accounts': accounts}
         except Exception as e:
-            print(f"   ⚠️  Error: {e}")
+            return {'success': False, 'error': str(e)}
     
-    print("\n" + "─"*60)
+    # ─── Execute parallel fetches ───
+    broker_results = {}
+    
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        futures = {}
+        
+        # Alpaca Paper
+        if config.get('alpaca_paper_key') and config.get('alpaca_paper_secret'):
+            futures[executor.submit(fetch_alpaca_info, 
+                config['alpaca_paper_key'], config['alpaca_paper_secret'], True, "Paper Trading")] = 'alpaca_paper'
+        
+        # Alpaca Live
+        if config.get('alpaca_live_key') and config.get('alpaca_live_secret'):
+            futures[executor.submit(fetch_alpaca_info,
+                config['alpaca_live_key'], config['alpaca_live_secret'], False, "Live Trading 🔴")] = 'alpaca_live'
+        
+        # TastyTrade Live
+        if config.get('tastytrade_username') and config.get('tastytrade_password'):
+            futures[executor.submit(fetch_tastytrade_info,
+                config['tastytrade_username'], config['tastytrade_password'], False, "TastyTrade Live")] = 'tt_live'
+        
+        # TastyTrade Sandbox
+        if config.get('tastytrade_sandbox_username') and config.get('tastytrade_sandbox_password'):
+            futures[executor.submit(fetch_tastytrade_info,
+                config['tastytrade_sandbox_username'], config['tastytrade_sandbox_password'], True, "TastyTrade Sandbox")] = 'tt_sandbox'
+        
+        # Schwab
+        if config.get('schwab_refresh_token'):
+            futures[executor.submit(fetch_schwab_info, config)] = 'schwab'
+        
+        # Collect results with timeout
+        for future in as_completed(futures, timeout=15):
+            key = futures[future]
+            try:
+                broker_results[key] = future.result()
+            except Exception as e:
+                broker_results[key] = {'success': False, 'error': str(e)}
+    
+    # ─── Display results ───
+    # Alpaca
+    print("\n🦙 ALPACA")
+    for key in ['alpaca_paper', 'alpaca_live']:
+        if key in broker_results:
+            data = broker_results[key]
+            if data.get('success'):
+                print(f"   📁 {data['label']}")
+                bal = data['balance']
+                print(f"      💰 Equity: ${bal['equity']:,.2f} | Cash: ${bal['cash']:,.2f} | BP: ${bal['buying_power']:,.2f}")
+                if data['symbols']:
+                    print(f"      📊 Positions: {len(data['positions'])} legs across {len(data['symbols'])} symbols")
+                    for sym, count in list(data['symbols'].items())[:3]:
+                        print(f"         • {sym} ({count} legs)")
+                if data['fills']:
+                    print(f"      📜 Recent Fills:")
+                    for act in data['fills']:
+                        print(f"         • {act.get('side','').upper()} {act.get('qty','')}x {act.get('symbol','')[:15]} @ ${act.get('price','')}")
+            else:
+                print(f"   📁 {data.get('label', key)}: ⚠️ {data.get('error', 'Unknown error')}")
+    
+    # TastyTrade Live
+    if 'tt_live' in broker_results:
+        data = broker_results['tt_live']
+        print("\n🍒 TASTYTRADE (Live)")
+        if data.get('success'):
+            for acct in data.get('accounts', []):
+                print(f"   📁 {acct['account']} ({acct['nickname']})")
+                print(f"      💰 Equity: ${acct['equity']:,.2f} | Cash: ${acct['cash']:,.2f} | BP: ${acct['bp']:,.2f}")
+                if acct['positions']:
+                    print(f"      📊 Positions: {len(acct['positions'])}")
+        else:
+            print(f"   ⚠️ {data.get('error', 'Connection failed')}")
+    
+    # TastyTrade Sandbox
+    if 'tt_sandbox' in broker_results:
+        data = broker_results['tt_sandbox']
+        print("\n🧪 TASTYTRADE SANDBOX")
+        if data.get('success'):
+            for acct in data.get('accounts', []):
+                print(f"   📁 {acct['account']} ({acct['nickname']})")
+                print(f"      💰 Equity: ${acct['equity']:,.2f} | Cash: ${acct['cash']:,.2f}")
+                if acct['positions']:
+                    print(f"      📊 Positions: {len(acct['positions'])}")
+        else:
+            print(f"   ⚠️ {data.get('error', 'Connection failed')}")
+    
+    # Schwab
+    if 'schwab' in broker_results:
+        data = broker_results['schwab']
+        print("\n🏦 SCHWAB (Live)")
+        if data.get('success'):
+            for acct in data.get('accounts', []):
+                print(f"   📁 {acct['account']} ({acct['type']})")
+                print(f"      💰 Equity: ${acct['equity']:,.2f} | Cash: ${acct['cash']:,.2f} | BP: ${acct['bp']:,.2f}")
+                if acct['positions']:
+                    print(f"      📊 Positions: {len(acct['positions'])}")
+        else:
+            print(f"   ⚠️ {data.get('error', 'Token refresh failed')}")
+    
+    
+    dashboard_time = time.time() - dashboard_start
+    print(f"\n⚡ Dashboard loaded in {dashboard_time:.2f}s")
+    print("─"*60)
     
     # Initialize TastyTrade for market data (real Greeks/IV)
     tastytrade = None
@@ -531,10 +530,24 @@ def main():
     skew = market_analyzer.calculate_put_call_skew(positions=enriched)
     print(f"      Skew: {skew['skew']:+.1f}")
     
-    # Monte Carlo
+    # Monte Carlo (JAX-accelerated when available)
     monte_carlo_result = None
     if not args.no_monte_carlo:
-        print(f"\n[6/7] Running Monte Carlo ({args.monte_carlo:,} paths)...")
+        # Show backend info
+        backend_info = f"({MC_BACKEND})"
+        try:
+            if hasattr(MonteCarloSimulator, 'get_backend_info'):
+                info = MonteCarloSimulator.get_backend_info()
+                if info.get('gpu_available'):
+                    backend_info = "(JAX GPU 🚀)"
+                elif info.get('jax_available'):
+                    backend_info = "(JAX CPU)"
+                else:
+                    backend_info = "(NumPy)"
+        except:
+            pass
+        
+        print(f"\n[6/7] Running Monte Carlo {backend_info} ({args.monte_carlo:,} paths)...")
         
         # Get IV for simulation
         ivs = [p.get('iv') for p in enriched if p.get('iv')]
@@ -556,14 +569,17 @@ def main():
                 dte=strategy_info['dte'],
                 volatility=avg_iv,
                 entry_credit=strategy_info['net_credit'],
-                breakeven_lower=strategy_info.get('breakeven_lower'),
-                breakeven_upper=strategy_info.get('breakeven_upper'),
                 use_heston=args.heston
             )
             
             monte_carlo_result = mc_result.to_dict()
             
-            print(f"      ✓ Probability of Profit: {mc_result.pop:.1f}%")
+            # Show execution time if available
+            exec_time = ""
+            if hasattr(mc_result, 'execution_time'):
+                exec_time = f" ({mc_result.execution_time*1000:.0f}ms)"
+            
+            print(f"      ✓ Probability of Profit: {mc_result.pop:.1f}%{exec_time}")
             print(f"      ✓ Expected P&L: ${mc_result.expected_pl:+.2f}")
             print(f"      ✓ 95% VaR: ${mc_result.var_95:.2f}")
             print(f"      ✓ Optimal Exit: {mc_result.optimal_exit_dte} DTE")

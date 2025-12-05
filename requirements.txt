@@ -4,3 +4,8 @@ numpy>=1.24.0
 scipy>=1.10.0
 tastytrade>=8.0.0
 yfinance>=0.2.0
+
+# JAX for accelerated Monte Carlo (CPU version)
+# For GPU: pip install jax[cuda12] (requires CUDA)
+jax>=0.4.0
+jaxlib>=0.4.0

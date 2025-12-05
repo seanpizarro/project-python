@@ -4,6 +4,16 @@ import numpy as np
 from typing import Dict, Optional, List
 from datetime import datetime, timedelta
 
+# Import caching
+try:
+    from utils.cache import cached
+except ImportError:
+    # Fallback: no-op decorator if cache not available
+    def cached(ttl=60, key_prefix=""):
+        def decorator(func):
+            return func
+        return decorator
+
 
 class MarketAnalyzer:
     """Advanced market analysis for options trading"""
@@ -20,7 +30,12 @@ class MarketAnalyzer:
         return self._yf
     
     def get_vix_data(self) -> Dict:
-        """Get VIX and related volatility indices"""
+        """Get VIX and related volatility indices (cached for 60s)"""
+        return self._get_vix_data_cached()
+    
+    @cached(ttl=60, key_prefix="vix")
+    def _get_vix_data_cached(self) -> Dict:
+        """Internal cached VIX fetch"""
         try:
             vix = self.yf.Ticker("^VIX")
             vix_hist = vix.history(period="1y")
