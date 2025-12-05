@@ -1,0 +1,32 @@
+"""Configuration management"""
+
+import os
+from pathlib import Path
+from typing import Dict
+from dotenv import load_dotenv
+
+
+def load_config() -> Dict[str, str]:
+    """Load configuration from .env file"""
+    
+    # Load .env file
+    env_path = Path(__file__).parent / '.env'
+    load_dotenv(env_path)
+    
+    config = {
+        # Alpaca credentials
+        'alpaca_paper_key': os.getenv('ALPACA_PAPER_API_KEY', ''),
+        'alpaca_paper_secret': os.getenv('ALPACA_PAPER_SECRET_KEY', ''),
+        'alpaca_live_key': os.getenv('ALPACA_LIVE_API_KEY', ''),
+        'alpaca_live_secret': os.getenv('ALPACA_LIVE_SECRET_KEY', ''),
+        
+        # TastyTrade credentials
+        'tastytrade_username': os.getenv('TASTYTRADE_USERNAME', ''),
+        'tastytrade_password': os.getenv('TASTYTRADE_PASSWORD', ''),
+        
+        # API keys for market data
+        'polygon_api_key': os.getenv('POLYGON_API_KEY', ''),
+        'finnhub_api_key': os.getenv('FINNHUB_API_KEY', ''),
+    }
+    
+    return config
