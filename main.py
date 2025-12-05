@@ -13,6 +13,8 @@ from datetime import datetime
 from pathlib import Path
 
 from brokers.alpaca_client import AlpacaClient
+from brokers.tastytrade_trader import TastyTradeTrader
+from utils.helpers import safe_float
 from analyzers.strategy_detector import StrategyDetector
 from analyzers.greeks_calculator import GreeksCalculator
 from analyzers.monte_carlo import MonteCarloSimulator
@@ -88,6 +90,85 @@ def main():
     except Exception as e:
         print(f"\n❌ Alpaca connection failed: {e}")
         sys.exit(1)
+
+    # Show TastyTrade account balances (read-only)
+    tt_balances = []
+    if config.get('tastytrade_username') and config.get('tastytrade_password'):
+        print("\n[0/7] Fetching TastyTrade account balances (read-only)...")
+        try:
+            tt_trader = TastyTradeTrader(
+                username=config['tastytrade_username'],
+                password=config['tastytrade_password'],
+                sandbox=False  # live endpoints, read-only balance
+            )
+            if tt_trader._authenticated:
+                # Get all accounts
+                import requests
+                url = f"{tt_trader.base_url}/customers/me/accounts"
+                resp = requests.get(url, headers=tt_trader.headers, timeout=10)
+                resp.raise_for_status()
+                accounts = resp.json().get('data', {}).get('items', [])
+                for acct in accounts:
+                    acc_num = acct.get('account', {}).get('account-number')
+                    nickname = acct.get('account', {}).get('nickname') or acct.get('account', {}).get('account-type-name')
+                    # fetch balance per account
+                    bal = {}
+                    try:
+                        bal = requests.get(
+                            f"{tt_trader.base_url}/accounts/{acc_num}/balances",
+                            headers=tt_trader.headers,
+                            timeout=10
+                        ).json().get('data', {})
+                    except Exception:
+                        bal = {}
+                    tt_balances.append({
+                        'account': acc_num,
+                        'nickname': nickname,
+                        'equity': safe_float(bal.get('net-liquidating-value', 0)),
+                        'cash': safe_float(bal.get('cash-balance', 0)),
+                        'buying_power': safe_float(bal.get('derivative-buying-power', 0))
+                    })
+                # print balances
+                for b in tt_balances:
+                    print(f"      🧾 TT {b['account']} ({b['nickname']}): Equity ${b['equity']:,.2f} | Cash ${b['cash']:,.2f} | BP ${b['buying_power']:,.2f}")
+            else:
+                print("      ⚠️  TastyTrade auth failed (balances skipped)")
+        except Exception as e:
+            print(f"      ⚠️  TastyTrade balance fetch error: {e}")
+    
+    # Fetch Schwab balances (read-only)
+    if config.get('schwab_refresh_token'):
+        try:
+            import base64
+            client_id = config['schwab_app_key']
+            client_secret = config['schwab_client_secret']
+            refresh_token = config['schwab_refresh_token']
+            
+            basic = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
+            token_resp = requests.post('https://api.schwabapi.com/v1/oauth/token', headers={
+                'Authorization': f'Basic {basic}',
+                'Content-Type': 'application/x-www-form-urlencoded'
+            }, data={'grant_type': 'refresh_token', 'refresh_token': refresh_token}, timeout=30)
+            
+            if token_resp.status_code == 200:
+                schwab_token = token_resp.json()['access_token']
+                schwab_resp = requests.get('https://api.schwabapi.com/trader/v1/accounts',
+                    headers={'Authorization': f'Bearer {schwab_token}', 'Accept': 'application/json'}, timeout=20)
+                
+                if schwab_resp.status_code == 200:
+                    for acct in schwab_resp.json():
+                        sec = acct.get('securitiesAccount', {})
+                        num = sec.get('accountNumber', '?')
+                        typ = sec.get('type', 'Unknown')
+                        bal = sec.get('currentBalances', {})
+                        equity = bal.get('liquidationValue', 0)
+                        cash = bal.get('cashBalance', bal.get('availableFunds', 0))
+                        bp = bal.get('buyingPower', 0)
+                        print(f"      💵 Schwab {num} ({typ}): Equity ${equity:,.2f} | Cash ${cash:,.2f} | BP ${bp:,.2f}")
+            else:
+                print(f"      ⚠️  Schwab token refresh failed (may need re-auth)")
+        except Exception as e:
+            print(f"      ⚠️  Schwab balance error: {e}")
     
     # Initialize TastyTrade for market data (real Greeks/IV)
     tastytrade = None
@@ -392,3 +473,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+1

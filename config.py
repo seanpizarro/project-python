@@ -37,6 +37,11 @@ def load_config() -> Dict[str, str]:
         # API keys for market data
         'polygon_api_key': os.getenv('POLYGON_API_KEY', ''),
         'finnhub_api_key': os.getenv('FINNHUB_API_KEY', ''),
+        
+        # Schwab credentials
+        'schwab_app_key': os.getenv('SCHWAB_APP_KEY', ''),
+        'schwab_client_secret': os.getenv('SCHWAB_CLIENT_SECRET', ''),
+        'schwab_refresh_token': os.getenv('SCHWAB_REFRESH_TOKEN', ''),
     }
     
     return config
