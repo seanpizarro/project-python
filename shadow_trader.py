@@ -292,16 +292,15 @@ def main():
         sys.exit(1)
     
     try:
-        # Note: Sandbox requires separate TastyTrade registration
-        # Using production account for now (not funded = safe for testing)
+        # Use TastyTrade Sandbox for paper trading
         tastytrade = TastyTradeTrader(
-            username=config['tastytrade_username'],
-            password=config['tastytrade_password'],
-            sandbox=False  # Using production (not funded = paper-like)
+            username=config.get('tastytrade_sandbox_username') or config['tastytrade_username'],
+            password=config.get('tastytrade_sandbox_password') or config['tastytrade_password'],
+            sandbox=True  # Use cert/sandbox environment
         )
         if not tastytrade._authenticated:
             raise Exception("Authentication failed")
-        print(f"  ✓ TastyTrade connected (Account: {tastytrade.account_number})")
+        print(f"  ✓ TastyTrade Sandbox connected (Account: {tastytrade.account_number})")
     except Exception as e:
         print(f"  ✗ TastyTrade connection failed: {e}")
         sys.exit(1)

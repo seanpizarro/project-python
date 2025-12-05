@@ -208,21 +208,37 @@ class TastyTradeTrader:
             return {'error': 'Not authenticated'}
         
         try:
-            # Build OCC symbol
+            # Build OCC symbol (TastyTrade format with padding)
             exp_date = datetime.strptime(expiration, '%Y-%m-%d')
             exp_str = exp_date.strftime('%y%m%d')
             opt_char = 'C' if option_type.lower() == 'call' else 'P'
             strike_str = f"{int(strike * 1000):08d}"
-            occ_symbol = f"{underlying}{exp_str}{opt_char}{strike_str}"
+            # TastyTrade requires underlying padded to 6 chars
+            underlying_padded = underlying.ljust(6)
+            occ_symbol = f"{underlying_padded}{exp_str}{opt_char}{strike_str}"
+            
+            # Determine price effect
+            is_buy = 'buy' in action.lower()
+            price_effect = 'Debit' if is_buy else 'Credit'
+            
+            # Format action: buy_to_open -> Buy to Open (lowercase 'to')
+            action_map = {
+                'buy_to_open': 'Buy to Open',
+                'sell_to_open': 'Sell to Open',
+                'buy_to_close': 'Buy to Close',
+                'sell_to_close': 'Sell to Close'
+            }
+            action_formatted = action_map.get(action.lower(), action)
             
             # Build order
             order = {
                 'time-in-force': 'Day',
                 'order-type': order_type,
+                'price-effect': price_effect,
                 'legs': [{
                     'instrument-type': 'Equity Option',
                     'symbol': occ_symbol,
-                    'action': action.replace('_', ' ').title().replace(' ', ' to '),
+                    'action': action_formatted,
                     'quantity': quantity
                 }]
             }
