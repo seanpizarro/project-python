@@ -264,9 +264,15 @@ def main():
     if not args.no_monte_carlo:
         print(f"\n[6/7] Running Monte Carlo ({args.monte_carlo:,} paths)...")
         
-        # Get average IV from positions
-        ivs = [p.get('iv', 0) for p in enriched if p.get('iv')]
-        avg_iv = sum(ivs) / len(ivs) if ivs else 0.25
+        # Get average IV from positions - only use real calculated IVs
+        ivs = [p.get('iv') for p in enriched if p.get('iv') and p.get('iv_source') != 'unavailable']
+        if ivs:
+            avg_iv = sum(ivs) / len(ivs)
+            print(f"      Using calculated IV: {avg_iv*100:.1f}%")
+        else:
+            # Fall back to VIX-based estimate if no IV available
+            avg_iv = vix_data['vix'] / 100 * 1.2  # VIX + 20% for individual stock
+            print(f"      ⚠️  No IV from prices, using VIX estimate: {avg_iv*100:.1f}%")
         
         simulator = MonteCarloSimulator(n_paths=args.monte_carlo)
         
@@ -297,6 +303,9 @@ def main():
     # Compile analysis
     print(f"\n[7/7] Compiling analysis...")
     
+    # Document data sources
+    has_real_iv = any(p.get('iv') and p.get('iv_source') != 'unavailable' for p in enriched)
+    
     analysis_data = {
         'timestamp': datetime.now().isoformat(),
         'account_type': broker_display,
@@ -306,12 +315,21 @@ def main():
         'iv_rank': iv_rank,
         'iv_percentile': iv_percentile,
         
+        'data_sources': {
+            'prices': 'broker_api',
+            'greeks': 'exchange' if broker_name == 'tastytrade' else ('calculated_from_prices' if has_real_iv else 'unavailable'),
+            'iv': 'exchange' if broker_name == 'tastytrade' else ('calculated_from_prices' if has_real_iv else 'vix_estimate'),
+            'iv_rank': 'exchange' if broker_name == 'tastytrade' else 'calculated_52w_hv',
+            'vix': 'yfinance',
+            'entry_date': 'not_available_from_broker'
+        },
+        
         'position': {
             'position_id': f"{strategy_info['strategy']}_{symbol}_{datetime.now().strftime('%Y%m%d')}",
             'symbol': symbol,
             'strategy': strategy_info['strategy'],
             'dte': strategy_info['dte'],
-            'entry_date': strategy_info['entry_date'],
+            'entry_date': strategy_info['entry_date'],  # Will be None - broker doesn't provide
             'legs': enriched,
             'net_credit': strategy_info['net_credit'],
             'current_value': strategy_info['current_value'],

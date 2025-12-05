@@ -41,7 +41,8 @@ class ReportFormatter:
         pos = analysis['position']
         lines.append("")
         lines.append(f"CURRENT POSITION: {pos['strategy']} {analysis['underlying']} ({pos['dte']} DTE)")
-        lines.append(f"Entry: {pos['entry_date']} | Net Credit: ${pos['net_credit']:.2f}")
+        entry_str = pos['entry_date'] if pos.get('entry_date') else "N/A (not from broker)"
+        lines.append(f"Entry: {entry_str} | Net Credit: ${pos['net_credit']:.2f}")
         lines.append(f"Current Value: ${pos['current_value']:.2f} | P&L: ${pos['current_pnl']:+.2f}")
         
         # Max profit/loss

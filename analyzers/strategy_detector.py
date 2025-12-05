@@ -170,8 +170,7 @@ class StrategyDetector:
         }
     
     def _estimate_entry_date(self) -> str:
-        """Estimate entry date"""
-        from datetime import datetime, timedelta
-        avg_dte = sum(p.get('dte', 0) for p in self.positions) / len(self.positions)
-        entry = datetime.now() - timedelta(days=max(0, 30-avg_dte))
-        return entry.strftime('%Y-%m-%d')
+        """Return unknown - we don't have real entry date from broker"""
+        # NOTE: Alpaca API doesn't provide entry date
+        # TastyTrade API might - check there if available
+        return None  # Don't fabricate dates
