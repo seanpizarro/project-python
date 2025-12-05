@@ -1,171 +1,129 @@
-"""TastyTrade Market Data Client - Using official tastytrade SDK"""
+"""TastyTrade Market Data Client - Direct API (no SDK)"""
 
+import requests
 from typing import Dict, List, Optional
-import getpass
+from utils.helpers import safe_float
 
 
 class TastyTradeDataClient:
     """
-    TastyTrade client for market data (Greeks, IV, metrics)
-    Uses official tastytrade SDK for reliable data
+    TastyTrade client for market data (IV rank, metrics)
+    Uses direct API calls (SDK has auth issues)
     """
+    
+    BASE_URL = "https://api.tastyworks.com"
     
     def __init__(self, username: str = None, password: str = None):
         self.username = username
         self.password = password
-        self.session = None
+        self.session_token = None
+        self.headers = {}
         self._authenticated = False
         
         if username and password:
             self._authenticate()
     
     def _authenticate(self) -> bool:
-        """Authenticate with TastyTrade"""
+        """Authenticate with TastyTrade via direct API"""
         try:
-            from tastytrade import Session
-            self.session = Session(self.username, self.password)
+            url = f"{self.BASE_URL}/sessions"
+            payload = {
+                "login": self.username,
+                "password": self.password,
+                "remember-me": True
+            }
+            
+            response = requests.post(url, json=payload, timeout=30)
+            response.raise_for_status()
+            
+            data = response.json()
+            self.session_token = data['data']['session-token']
+            self.headers = {
+                'Authorization': self.session_token,
+                'Content-Type': 'application/json'
+            }
             self._authenticated = True
             return True
+            
         except Exception as e:
             print(f"  ⚠️  TastyTrade auth failed: {e}")
             self._authenticated = False
             return False
     
-    def ensure_authenticated(self) -> bool:
-        """Ensure we have a valid session"""
-        if self._authenticated and self.session:
-            return True
-        
-        if not self.username or not self.password:
-            print("\n🔐 TastyTrade credentials needed for real Greeks")
-            self.username = input("   Email: ").strip()
-            self.password = getpass.getpass("   Password: ")
-        
-        return self._authenticate()
-    
     def get_market_metrics(self, symbol: str) -> Dict:
         """Get IV rank, IV percentile, earnings from TastyTrade"""
-        if not self.ensure_authenticated():
+        if not self._authenticated:
             return {}
         
         try:
-            from tastytrade.instruments import get_option_chain
-            from tastytrade.market_metrics import get_market_metrics
+            url = f"{self.BASE_URL}/market-metrics"
+            params = {'symbols': symbol}
             
-            metrics_list = get_market_metrics(self.session, [symbol])
+            response = requests.get(url, headers=self.headers, params=params, timeout=10)
+            response.raise_for_status()
             
-            if metrics_list:
-                m = metrics_list[0]
-                # Convert decimals to percentages
-                iv_rank = (m.implied_volatility_index_rank or 0) * 100
-                iv_pct = (m.implied_volatility_percentile or 0) * 100
+            data = response.json()
+            items = data.get('data', {}).get('items', [])
+            
+            if items:
+                m = items[0]
+                # TastyTrade returns decimals (0.12 = 12%)
+                iv_rank_raw = safe_float(m.get('implied-volatility-index-rank'))
+                iv_pct_raw = safe_float(m.get('implied-volatility-percentile'))
                 
                 return {
-                    'iv_rank': round(iv_rank, 1),
-                    'iv_percentile': round(iv_pct, 1),
-                    'iv': m.implied_volatility_index,
-                    'hv_30': m.hv_30_implied_volatility,
-                    'earnings_expected_move': m.earnings_expected_move,
-                    'earnings_date': str(m.next_earnings_date) if m.next_earnings_date else None,
-                    'liquidity_rating': m.liquidity_rating,
+                    'iv_rank': round(iv_rank_raw * 100, 1) if iv_rank_raw else 0,
+                    'iv_percentile': round(iv_pct_raw * 100, 1) if iv_pct_raw else 0,
+                    'iv': safe_float(m.get('implied-volatility-index')),
+                    'hv_30': safe_float(m.get('hv-30-implied-volatility')),
+                    'hv_60': safe_float(m.get('hv-60-implied-volatility')),
+                    'hv_90': safe_float(m.get('hv-90-implied-volatility')),
+                    'earnings_expected_move': safe_float(m.get('earnings-expected-move')),
+                    'earnings_date': m.get('next-earnings-date'),
+                    'liquidity_rating': m.get('liquidity-rating'),
                     'source': 'tastytrade_exchange'
                 }
+                
         except Exception as e:
             print(f"  ⚠️  TastyTrade metrics error: {e}")
         
         return {}
     
-    def get_option_greeks(self, option_symbols: List[str]) -> Dict[str, Dict]:
-        """
-        Get real Greeks for option symbols from TastyTrade
-        
-        Args:
-            option_symbols: List of OCC format symbols
-        
-        Returns:
-            Dict mapping symbol -> {delta, gamma, theta, vega, iv}
-        """
-        if not self.ensure_authenticated():
+    def get_stock_quote(self, symbol: str) -> Dict:
+        """Get current price for underlying"""
+        if not self._authenticated:
             return {}
         
         try:
-            from tastytrade.dxfeed import Greeks
-            from tastytrade.instruments import EquityOption
+            # TastyTrade uses instruments endpoint for equities
+            url = f"{self.BASE_URL}/instruments/equities/{symbol}"
+            response = requests.get(url, headers=self.headers, timeout=10)
             
-            # Convert OCC symbols to streamer symbols
-            streamer_symbols = []
-            symbol_map = {}
-            
-            for sym in option_symbols:
-                # OCC: SPY   251225C00700000 -> .SPY251225C700
-                # Remove spaces and format
-                clean = sym.replace(' ', '')
-                # Extract parts
-                underlying = ''
-                for i, c in enumerate(clean):
-                    if c.isdigit():
-                        underlying = clean[:i]
-                        rest = clean[i:]
-                        break
+            if response.status_code == 200:
+                data = response.json()
+                return {'symbol': symbol, 'data': data.get('data', {})}
                 
-                if underlying:
-                    date = rest[:6]
-                    opt_type = rest[6]
-                    strike_raw = rest[7:]
-                    strike = str(int(int(strike_raw) / 1000))
-                    streamer = f'.{underlying}{date}{opt_type}{strike}'
-                    streamer_symbols.append(streamer)
-                    symbol_map[streamer] = sym
-            
-            # Get Greeks via DXFeed
-            # Note: This requires the streaming API
-            # For now, return empty and fall back to calculated
-            return {}
-            
-        except Exception as e:
-            print(f"  ⚠️  TastyTrade Greeks error: {e}")
+        except Exception:
+            pass
         
         return {}
     
     def enrich_positions_with_greeks(self, positions: List[Dict]) -> List[Dict]:
         """
-        Fetch real Greeks from TastyTrade for positions
-        
-        Note: The streaming API is needed for real-time Greeks.
-        This method will attempt to get them, or fall back gracefully.
+        TastyTrade doesn't provide Greeks via REST API.
+        Greeks require the DXFeed streaming WebSocket which isn't available.
+        Return positions unchanged - let calculator handle Greeks.
         """
-        if not self.ensure_authenticated():
-            # Return positions unchanged, let calculator handle it
-            return positions
-        
         enriched = []
-        symbols = [p.get('symbol', '') for p in positions]
-        
-        # Try to get Greeks
-        greeks_data = self.get_option_greeks(symbols)
-        
         for pos in positions:
             pos_copy = pos.copy()
-            sym = pos.get('symbol', '')
-            
-            if sym in greeks_data:
-                g = greeks_data[sym]
-                pos_copy['delta'] = g.get('delta')
-                pos_copy['gamma'] = g.get('gamma')
-                pos_copy['theta'] = g.get('theta')
-                pos_copy['vega'] = g.get('vega')
-                pos_copy['iv'] = g.get('iv')
-                pos_copy['iv_source'] = 'tastytrade_exchange'
-            else:
-                pos_copy['iv_source'] = 'unavailable_from_tastytrade'
-            
+            pos_copy['iv_source'] = 'tastytrade_no_streaming_greeks'
             enriched.append(pos_copy)
-        
         return enriched
     
     def test_connection(self) -> bool:
         """Test if TastyTrade connection works"""
-        if not self.ensure_authenticated():
+        if not self._authenticated:
             return False
         
         try:
@@ -176,8 +134,9 @@ class TastyTradeDataClient:
     
     def close(self):
         """Close session"""
-        if self.session:
+        if self.session_token:
             try:
-                self.session.destroy()
+                url = f"{self.BASE_URL}/sessions"
+                requests.delete(url, headers=self.headers, timeout=5)
             except Exception:
                 pass
