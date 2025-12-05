@@ -20,7 +20,17 @@ def load_config() -> Dict[str, str]:
         'alpaca_live_key': os.getenv('ALPACA_LIVE_API_KEY', ''),
         'alpaca_live_secret': os.getenv('ALPACA_LIVE_SECRET_KEY', ''),
         
-        # TastyTrade credentials
+        # TastyTrade Live (OAuth2)
+        'tastytrade_account': os.getenv('TASTYTRADE_ACCOUNT', ''),
+        'tastytrade_client_id': os.getenv('TASTYTRADE_CLIENT_ID', ''),
+        'tastytrade_client_secret': os.getenv('TASTYTRADE_CLIENT_SECRET', ''),
+        'tastytrade_refresh_token': os.getenv('TASTYTRADE_REFRESH_TOKEN', ''),
+        
+        # TastyTrade Sandbox (OAuth2)
+        'tastytrade_sandbox_client_id': os.getenv('TASTYTRADE_SANDBOX_CLIENT_ID', ''),
+        'tastytrade_sandbox_client_secret': os.getenv('TASTYTRADE_SANDBOX_CLIENT_SECRET', ''),
+        
+        # TastyTrade session auth (alternative)
         'tastytrade_username': os.getenv('TASTYTRADE_USERNAME', ''),
         'tastytrade_password': os.getenv('TASTYTRADE_PASSWORD', ''),
         
