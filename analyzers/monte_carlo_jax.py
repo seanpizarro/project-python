@@ -239,7 +239,18 @@ class MonteCarloJAX:
         positions: List[Dict],
         entry_credit: float
     ) -> np.ndarray:
-        """Calculate P&L for option positions at expiration"""
+        """
+        Calculate P&L for option positions at expiration
+        
+        Args:
+            final_prices: Array of simulated final underlying prices
+            positions: List of position dicts with strike, type, position, qty
+            entry_credit: Net credit received in DOLLARS (positive = credit, negative = debit)
+                         This is the TOTAL amount, not per-share
+        
+        Returns:
+            Array of P&L values for each simulated path
+        """
         payoffs = np.zeros(len(final_prices))
         
         for pos in positions:
@@ -253,10 +264,13 @@ class MonteCarloJAX:
             else:
                 intrinsic = np.maximum(strike - final_prices, 0)
             
+            # Each contract = 100 shares
             payoffs += direction * qty * intrinsic * 100
         
-        # Add entry credit/debit
-        payoffs += entry_credit * 100
+        # Add entry credit/debit (already in dollars, no multiplier needed)
+        # Positive entry_credit = we received money (credit spread)
+        # Negative entry_credit = we paid money (debit spread)
+        payoffs += entry_credit
         
         return payoffs
     
