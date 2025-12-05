@@ -99,51 +99,87 @@ def main():
     print("📊 BROKER DASHBOARD")
     print("─"*60)
     
-    # ─── ALPACA ───
-    print("\n🦙 ALPACA " + ("(Paper)" if args.live is False else "(Live)"))
-    try:
-        alpaca_bal = alpaca.get_account_balance()
-        print(f"   💰 Equity: ${alpaca_bal['equity']:,.2f}")
-        print(f"   💵 Cash: ${alpaca_bal['cash']:,.2f}")
-        print(f"   💳 Buying Power: ${alpaca_bal['buying_power']:,.2f}")
-        
-        # Alpaca open orders
+    # ─── ALPACA (Both Paper & Live) ───
+    def show_alpaca_account(client, label):
+        """Display Alpaca account info"""
         try:
-            orders_url = f"{alpaca.base_url}/v2/orders?status=open"
-            orders_resp = requests.get(orders_url, headers=alpaca.headers, timeout=10)
-            open_orders = orders_resp.json() if orders_resp.status_code == 200 else []
-            if open_orders:
-                print(f"\n   📋 Open Orders: {len(open_orders)}")
-                for order in open_orders[:5]:
-                    side = order.get('side', '').upper()
-                    qty = order.get('qty', '')
-                    symbol = order.get('symbol', '')
-                    order_type = order.get('type', '')
-                    print(f"      • {side} {qty}x {symbol} ({order_type})")
-            else:
-                print(f"   📋 Open Orders: None")
-        except Exception:
-            pass
-        
-        # Alpaca recent activity
-        try:
-            activities_url = f"{alpaca.base_url}/v2/account/activities/FILL?direction=desc&page_size=5"
-            act_resp = requests.get(activities_url, headers=alpaca.headers, timeout=10)
-            activities = act_resp.json() if act_resp.status_code == 200 else []
-            if activities:
-                print(f"\n   📜 Recent Fills:")
-                for act in activities[:3]:
-                    side = act.get('side', '').upper()
-                    qty = act.get('qty', '')
-                    symbol = act.get('symbol', '')
-                    price = act.get('price', '')
-                    date = act.get('transaction_time', '')[:10]
-                    print(f"      • {date}: {side} {qty}x {symbol} @ ${price}")
-        except Exception:
-            pass
+            bal = client.get_account_balance()
+            print(f"   📁 {label}")
+            print(f"      💰 Equity: ${bal['equity']:,.2f} | Cash: ${bal['cash']:,.2f} | BP: ${bal['buying_power']:,.2f}")
             
-    except Exception as e:
-        print(f"   ⚠️  Error: {e}")
+            # Positions
+            positions = client.get_all_positions()
+            if positions:
+                # Group by underlying
+                symbols = {}
+                for pos in positions:
+                    sym = pos.get('underlying_symbol', pos.get('symbol', ''))
+                    if sym not in symbols:
+                        symbols[sym] = 0
+                    symbols[sym] += 1
+                print(f"      📊 Positions: {len(positions)} legs across {len(symbols)} symbols")
+                for sym, count in list(symbols.items())[:3]:
+                    print(f"         • {sym} ({count} legs)")
+            
+            # Open orders
+            try:
+                orders_url = f"{client.base_url}/v2/orders?status=open"
+                orders_resp = requests.get(orders_url, headers=client.headers, timeout=10)
+                open_orders = orders_resp.json() if orders_resp.status_code == 200 else []
+                if open_orders:
+                    print(f"      📋 Open Orders: {len(open_orders)}")
+                    for order in open_orders[:3]:
+                        side = order.get('side', '').upper()
+                        qty = order.get('qty', '')
+                        symbol = order.get('symbol', '')
+                        print(f"         • {side} {qty}x {symbol}")
+            except Exception:
+                pass
+            
+            # Recent fills
+            try:
+                activities_url = f"{client.base_url}/v2/account/activities/FILL?direction=desc&page_size=3"
+                act_resp = requests.get(activities_url, headers=client.headers, timeout=10)
+                activities = act_resp.json() if act_resp.status_code == 200 else []
+                if activities:
+                    print(f"      📜 Recent Fills:")
+                    for act in activities[:2]:
+                        side = act.get('side', '').upper()
+                        qty = act.get('qty', '')
+                        symbol = act.get('symbol', '')[:15]
+                        price = act.get('price', '')
+                        print(f"         • {side} {qty}x {symbol} @ ${price}")
+            except Exception:
+                pass
+                
+        except Exception as e:
+            print(f"   📁 {label}: ⚠️ {e}")
+    
+    print("\n🦙 ALPACA")
+    
+    # Paper account (always show)
+    if config.get('alpaca_paper_key') and config.get('alpaca_paper_secret'):
+        try:
+            alpaca_paper = AlpacaClient(
+                api_key=config['alpaca_paper_key'],
+                secret_key=config['alpaca_paper_secret'],
+                paper=True
+            )
+            show_alpaca_account(alpaca_paper, "Paper Trading")
+        except Exception as e:
+            print(f"   📁 Paper Trading: ⚠️ Connection failed")
+    
+    # Live account
+    if config.get('alpaca_live_key') and config.get('alpaca_live_secret'):
+        try:
+            alpaca_live = AlpacaClient(
+                api_key=config['alpaca_live_key'],
+                secret_key=config['alpaca_live_secret'],
+                paper=False
+            )
+            show_alpaca_account(alpaca_live, "Live Trading 🔴")
+        except Exception as e:
+            print(f"   📁 Live Trading: ⚠️ Connection failed")
     
     # ─── TASTYTRADE ───
     tt_trader = None
