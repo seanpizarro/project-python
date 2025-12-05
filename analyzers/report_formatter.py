@@ -83,17 +83,36 @@ class ReportFormatter:
         if 'monte_carlo' in analysis:
             mc = analysis['monte_carlo']
             lines.append("")
-            lines.append(f"MONTE CARLO ANALYSIS ({mc['paths']:,} paths, {mc['model']} model)")
-            lines.append(f"Probability of Profit: {mc['pop']:.1f}%")
-            lines.append(f"Probability of Touch: {mc['pot_lower']:.1f}% (lower) | {mc['pot_upper']:.1f}% (upper)")
-            lines.append(f"Expected P&L: ${mc['expected_pl']:+.2f}")
-            lines.append(f"Median Outcome: ${mc['median_pl']:+.2f}")
+            
+            # Handle both old and JAX Monte Carlo formats
+            paths = mc.get('paths') or mc.get('paths_run', 50000)
+            model = mc.get('model') or mc.get('backend', 'GBM')
+            pop = mc.get('pop') or mc.get('probability_of_profit', 0)
+            
+            lines.append(f"MONTE CARLO ANALYSIS ({paths:,} paths, {model})")
+            lines.append(f"Probability of Profit: {pop:.1f}%")
+            
+            # Probability of touch (may not exist in JAX version)
+            if mc.get('pot_lower') is not None:
+                lines.append(f"Probability of Touch: {mc['pot_lower']:.1f}% (lower) | {mc['pot_upper']:.1f}% (upper)")
+            
+            lines.append(f"Expected P&L: ${mc.get('expected_pl', 0):+.2f}")
+            lines.append(f"Median Outcome: ${mc.get('median_pl', 0):+.2f}")
             lines.append("")
             lines.append("Risk Metrics:")
-            lines.append(f"  → 95% VaR: ${mc['var_95']:.2f} (worst case in 95% of scenarios)")
-            lines.append(f"  → 99% VaR: ${mc['var_99']:.2f} (extreme worst case)")
-            lines.append(f"  → Expected Shortfall: ${mc['expected_shortfall_95']:.2f}")
-            lines.append(f"Optimal Exit: {mc['optimal_exit_dte']} DTE")
+            lines.append(f"  → 95% VaR: ${mc.get('var_95', 0):.2f} (worst case in 95% of scenarios)")
+            lines.append(f"  → 99% VaR: ${mc.get('var_99', 0):.2f} (extreme worst case)")
+            
+            # Expected shortfall (may not exist in JAX version)
+            if mc.get('expected_shortfall_95') is not None:
+                lines.append(f"  → Expected Shortfall: ${mc['expected_shortfall_95']:.2f}")
+            
+            lines.append(f"Optimal Exit: {mc.get('optimal_exit_dte', 0)} DTE")
+            
+            # Show execution time if available
+            if mc.get('execution_time_ms'):
+                lines.append(f"Execution: {mc['execution_time_ms']:.0f}ms")
+            
             lines.append("─" * 67)
         
         # Market Regime Details
